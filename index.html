@@ -121,7 +121,7 @@
 
   .mode-cards {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 12px;
   }
 
@@ -204,6 +204,7 @@
   .badge-study { background: var(--primary-light); color: var(--primary); }
   .badge-qa { background: var(--success-light); color: var(--success); }
   .badge-exam { background: var(--warning-light); color: var(--warning); }
+  .badge-sales { background: #fff0f6; color: #c41d7f; }
 
   .chat-stats {
     display: flex;
@@ -707,6 +708,7 @@
 
   .btn-icon:hover { background: var(--gray-200); color: var(--gray-900); }
   .btn-icon.danger:hover { background: var(--danger-light); color: var(--danger); }
+  .btn-icon.edit:hover { background: var(--primary-light); color: var(--primary); }
 
   .kb-empty {
     text-align: center;
@@ -871,6 +873,11 @@
         <div class="mode-card-name">考试模式</div>
         <div class="mode-card-desc">模拟考试，AI 评分，给出详细点评</div>
       </div>
+      <div class="mode-card" id="card-sales" onclick="switchMode('sales')">
+        <span class="mode-card-icon">💼</span>
+        <div class="mode-card-name">销售技巧</div>
+        <div class="mode-card-desc">专项练习销售技巧类题目</div>
+      </div>
     </div>
   </div>
 
@@ -979,7 +986,10 @@
           <textarea class="form-textarea" id="add-keypoints" placeholder="逐行填写评分要点，AI 将据此评分。例如：&#10;- 提到飞行时间&#10;- 说明最大载重&#10;- 介绍适用场景" rows="3"></textarea>
           <div class="form-hint">每行一个要点，将作为考试评分的参考依据</div>
         </div>
-        <button class="btn-large btn-primary" style="width:100%" onclick="addKbItem()">✅ 保存到知识库</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-large btn-primary" style="flex:1" id="btn-save-item" onclick="addKbItem()">✅ 保存到知识库</button>
+          <button class="btn-large btn-outline" id="btn-cancel-edit" style="display:none" onclick="cancelEdit()">取消编辑</button>
+        </div>
       </div>
 
       <!-- 题库列表 -->
@@ -1027,6 +1037,7 @@ const API_BASE = '/api/kb';
 const ADMIN_API = '/api/admin';
 let adminToken = null; // 管理员登录 token
 let kbCache = [];      // 知识库缓存
+let editingId = null;  // 当前正在编辑的题目 ID，null 表示新建模式
 
 // 从服务器拉取知识库
 async function fetchKb() {
@@ -1065,13 +1076,14 @@ let kb = [];
 // ==============================
 // 状态
 // ==============================
-let currentMode = 'study'; // study | qa | exam
+let currentMode = 'study'; // study | qa | exam | sales
 let studyIndex = 0;
 let qaIndex = 0;
 let qaQueue = [];
 let examIndex = 0;
 let examQueue = [];
 let examScores = [];
+let salesIndex = 0;
 let waitingForAnswer = false;
 
 // ==============================
@@ -1090,8 +1102,10 @@ function switchMode(mode) {
   const inputHint = document.getElementById('input-hint');
   const userInput = document.getElementById('user-input');
   const examPanel = document.getElementById('exam-result-panel');
+  const salesProgWrap = document.getElementById('sales-progress-wrap');
 
   examPanel.classList.remove('show');
+  if (salesProgWrap) salesProgWrap.style.display = 'none';
 
   if (mode === 'study') {
     badge.className = 'chat-mode-badge badge-study';
@@ -1123,6 +1137,16 @@ function switchMode(mode) {
     userInput.disabled = false;
     document.getElementById('send-btn').disabled = false;
     startExamMode();
+  } else if (mode === 'sales') {
+    badge.className = 'chat-mode-badge badge-sales';
+    badge.textContent = '💼 销售技巧';
+    progWrap.style.display = 'block';
+    statTotal.style.display = 'none';
+    btnRestart.style.display = 'none';
+    inputHint.textContent = '销售技巧练习：阅读题目和答案，点击"下一题"继续';
+    userInput.disabled = true;
+    document.getElementById('send-btn').disabled = true;
+    startSalesMode();
   }
 }
 
@@ -1193,6 +1217,78 @@ function studyPrev() {
   if (studyIndex > 0) {
     studyIndex--;
     showStudyCard();
+  }
+}
+
+// ==============================
+// 销售技巧专项练习
+// ==============================
+async function startSalesMode() {
+  kb = await fetchKb();
+  const salesOnly = kb.filter(item => item.category === '销售技巧');
+  salesIndex = 0;
+  clearMessages();
+  if (!salesOnly.length) {
+    addMsg('bot', `<div style="text-align:center;padding:20px;color:var(--gray-500)">
+      📭 知识库中暂无分类为「销售技巧」的题目，<br>请先在知识库管理中添加相关题目。
+    </div>`);
+    return;
+  }
+  addMsg('bot', `<div style="font-size:14px;color:var(--gray-700);line-height:1.8">
+    💼 <strong>销售技巧专项练习</strong><br>
+    从「销售技巧」分类中调取 <strong style="color:#c41d7f">${salesOnly.length}</strong> 道题目。<br>
+    仔细阅读每道题和参考答案，掌握后点击"下一题"继续。
+  </div>`);
+  showSalesCard(salesOnly);
+}
+
+function showSalesCard(pool) {
+  if (salesIndex >= pool.length) {
+    addMsg('bot', `<div style="text-align:center;padding:10px 0">
+      🎉 <strong>全部 ${pool.length} 道销售技巧题已复习完毕！</strong><br>
+      <span style="color:var(--gray-500);font-size:13px">可以切换到"问答模式"或"考试模式"检验学习成果。</span>
+    </div>`);
+    updateProgress(pool.length, pool.length);
+    return;
+  }
+  const item = pool[salesIndex];
+  addMsg('bot', `<div>
+      <div style="font-size:12px;color:var(--gray-500);margin-bottom:6px">销售技巧 · 第 ${salesIndex + 1} 题</div>
+      <div class="qa-block">
+        <div class="qa-question">
+          <span>❓</span>
+          <span>${escHtml(item.question)}</span>
+        </div>
+        <div class="qa-answer">
+          <div class="qa-answer-label">✅ 参考答案</div>
+          <div>${escHtml(item.answer)}</div>
+          ${item.keypoints ? `<div style="margin-top:10px;padding:8px 10px;background:#fff0f6;border-radius:6px;font-size:12px;color:#c41d7f">
+            <strong>📌 评分要点：</strong>${escHtml(item.keypoints)}
+          </div>` : ''}
+        </div>
+      </div>
+      <div class="study-nav">
+        ${salesIndex > 0 ? `<button class="btn-sm btn-outline" onclick="salesPrev()">← 上一题</button>` : ''}
+        <button class="btn-sm btn-primary" style="background:#c41d7f;border-color:#c41d7f" onclick="salesNext()">下一题 →</button>
+        <span style="line-height:30px;font-size:12px;color:var(--gray-500)">${salesIndex + 1} / ${pool.length}</span>
+      </div>
+    </div>`);
+  updateProgress(salesIndex + 1, pool.length);
+  scrollBottom();
+}
+
+function salesNext() {
+  salesIndex++;
+  kb = kb.filter(item => item.category === '销售技巧');
+  showSalesCard(kb);
+  scrollBottom();
+}
+
+function salesPrev() {
+  if (salesIndex > 0) {
+    salesIndex--;
+    kb = kb.filter(item => item.category === '销售技巧');
+    showSalesCard(kb);
   }
 }
 
@@ -1299,9 +1395,64 @@ function generateQaFeedback(answer, item) {
 // ==============================
 // 考试模式
 // ==============================
+
+// 从各分类按比例随机抽取题目，总数为 targetCount（不足则全取）
+function pickExamQuestions(kb, targetCount) {
+  if (kb.length <= targetCount) return shuffle([...kb]);
+
+  // 按分类分组
+  const groups = {};
+  kb.forEach(item => {
+    const cat = item.category || '其他';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(item);
+  });
+
+  const categories = Object.keys(groups);
+  const totalQuestions = kb.length;
+  const result = [];
+  const remaining = {}; // 每个分类应抽数量
+
+  // 第一轮：按比例分配
+  let allocated = 0;
+  categories.forEach(cat => {
+    const proportion = groups[cat].length / totalQuestions;
+    const n = Math.floor(targetCount * proportion);
+    remaining[cat] = Math.min(n, groups[cat].length);
+    allocated += remaining[cat];
+  });
+
+  // 第二轮：剩余名额随机分配到还有余量的分类
+  let leftover = targetCount - allocated;
+  const eligible = categories.filter(cat => remaining[cat] < groups[cat].length);
+  while (leftover > 0 && eligible.length > 0) {
+    const pick = eligible[Math.floor(Math.random() * eligible.length)];
+    remaining[pick]++;
+    leftover--;
+    // 移除已满的分类
+    for (let i = eligible.length - 1; i >= 0; i--) {
+      if (remaining[eligible[i]] >= groups[eligible[i]].length) {
+        eligible.splice(i, 1);
+      }
+    }
+  }
+
+  // 从每个分类中随机抽取
+  categories.forEach(cat => {
+    const n = remaining[cat] || 0;
+    const shuffled = shuffle([...groups[cat]]);
+    for (let i = 0; i < n; i++) {
+      result.push(shuffled[i]);
+    }
+  });
+
+  return shuffle(result);
+}
+
 async function startExamMode() {
   kb = await fetchKb();
-  examQueue = shuffle([...kb]);
+  const total = kb.length;
+  examQueue = pickExamQuestions(kb, 50);
   examIndex = 0;
   examScores = [];
   waitingForAnswer = false;
@@ -1312,9 +1463,21 @@ async function startExamMode() {
     addMsg('bot', buildEmpty());
     return;
   }
+  // 统计各分类抽题数量
+  const catCounts = {};
+  examQueue.forEach(item => {
+    catCounts[item.category] = (catCounts[item.category] || 0) + 1;
+  });
+  const catSummary = Object.entries(catCounts)
+    .map(([cat, cnt]) => `<span style="background:var(--primary-light);color:var(--primary);padding:1px 8px;border-radius:10px;font-size:12px;margin:2px 4px;display:inline-block">${cat} ${cnt}题</span>`)
+    .join('');
+  const note = total < 50
+    ? `<span style="color:var(--warning);font-weight:600">⚠️ 题库总量仅 ${total} 道，已全部抽取。</span><br>`
+    : '';
   addMsg('bot', `<div style="font-size:14px;color:var(--gray-700);line-height:1.8">
     📝 <strong>考试模式已启动</strong><br>
-    共 <strong style="color:var(--warning)">${examQueue.length}</strong> 道题，请认真作答。<br>
+    ${note}题库共 <strong>${total}</strong> 道题，本次随机抽取 <strong style="color:var(--warning)">${examQueue.length}</strong> 道。<br>
+    <div style="margin:6px 0">${catSummary}</div>
     每题完成后系统将自动评分，结束后给出总成绩与综合点评。<br>
     <span style="font-size:12px;color:var(--gray-500)">💡 提示：请根据企业知识库内容作答，答案越完整分数越高。</span>
   </div>`);
@@ -1536,19 +1699,22 @@ function openKbModal() {
 }
 
 function updateKbAccess() {
-  // 如果未登录，显示管理员密码输入提示
   const listActions = document.querySelector('#kb-panel-list .btn-outline');
-  const addBtn = document.querySelector('#kb-panel-add .btn-large');
+  const addBtn = document.getElementById('btn-save-item');
   if (!adminToken) {
-    // 隐藏敏感操作
     if (listActions) listActions.style.display = 'none';
     if (addBtn) { addBtn.textContent = '🔐 请先验证管理员身份'; addBtn.disabled = true; }
-    document.querySelectorAll('.btn-icon.danger').forEach(b => b.style.display = 'none');
   } else {
     if (listActions) listActions.style.display = '';
-    if (addBtn) { addBtn.textContent = '✅ 保存到知识库'; addBtn.disabled = false; }
-    document.querySelectorAll('.btn-icon.danger').forEach(b => b.style.display = '');
+    if (addBtn) { 
+      addBtn.textContent = editingId ? '💾 更新题目' : '✅ 保存到知识库'; 
+      addBtn.disabled = false; 
+    }
   }
+  // 未登录时也隐藏编辑/删除按钮
+  document.querySelectorAll('.btn-icon.edit, .btn-icon.danger').forEach(b => {
+    b.style.display = adminToken ? '' : 'none';
+  });
 }
 
 function closeKbModal() {
@@ -1557,14 +1723,16 @@ function closeKbModal() {
 
 function switchKbTab(tab) {
   document.querySelectorAll('.kb-tab').forEach((t, i) => {
-    const tabs = ['add','list','import','login'];
+    const tabs = ['login','list','add','import'];
     t.classList.toggle('active', tabs[i] === tab);
   });
   document.querySelectorAll('.kb-panel').forEach(p => p.classList.remove('active'));
   const panel = document.getElementById('kb-panel-' + tab);
   if (panel) panel.classList.add('active');
   if (tab === 'list') { renderKbList(); updateKbAccess(); }
-  if (tab === 'add') updateKbAccess();
+  if (tab === 'add') { updateKbAccess(); updateEditHint(); }
+  // 切换到非编辑面板时取消编辑状态
+  if (tab !== 'add' && editingId) cancelEdit();
 }
 
 async function addKbItem() {
@@ -1579,14 +1747,69 @@ async function addKbItem() {
   }
 
   try {
-    await adminApi(API_BASE, 'POST', { category: c, question: q, answer: a, keypoints: k });
-    document.getElementById('add-question').value = '';
-    document.getElementById('add-answer').value = '';
-    document.getElementById('add-keypoints').value = '';
-    toast('✅ 已同步到云端知识库！');
+    if (editingId) {
+      // 编辑模式：更新已有题目
+      await adminApi(API_BASE + '/' + editingId, 'PUT', { category: c, question: q, answer: a, keypoints: k });
+      toast('✅ 题目已更新并同步到云端');
+    } else {
+      // 新建模式
+      await adminApi(API_BASE, 'POST', { category: c, question: q, answer: a, keypoints: k });
+      toast('✅ 已同步到云端知识库！');
+    }
+    clearAddForm();
+    cancelEdit();
     switchKbTab('list');
   } catch (e) {
     toast('❌ ' + e.message, 'warn');
+  }
+}
+
+function editKbItem(id) {
+  const item = kbCache.find(x => x.id === id);
+  if (!item) { toast('⚠️ 未找到该题目', 'warn'); return; }
+  editingId = id;
+  document.getElementById('add-category').value = item.category || '其他';
+  document.getElementById('add-question').value = item.question;
+  document.getElementById('add-answer').value = item.answer;
+  document.getElementById('add-keypoints').value = item.keypoints || '';
+  document.getElementById('btn-save-item').textContent = '💾 更新题目';
+  document.getElementById('btn-cancel-edit').style.display = '';
+  // 切换到添加/编辑面板
+  switchKbTab('add');
+  // 更新面板标题提示
+  updateEditHint();
+  // 滚动到表单顶部
+  document.getElementById('kb-panel-add').scrollIntoView({ behavior: 'smooth' });
+}
+
+function cancelEdit() {
+  editingId = null;
+  clearAddForm();
+  document.getElementById('btn-save-item').textContent = '✅ 保存到知识库';
+  document.getElementById('btn-cancel-edit').style.display = 'none';
+  updateEditHint();
+}
+
+function clearAddForm() {
+  document.getElementById('add-category').value = '产品知识';
+  document.getElementById('add-question').value = '';
+  document.getElementById('add-answer').value = '';
+  document.getElementById('add-keypoints').value = '';
+}
+
+function updateEditHint() {
+  const addPanel = document.getElementById('kb-panel-add');
+  let hint = addPanel.querySelector('.edit-hint');
+  if (editingId) {
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'edit-hint';
+      hint.style.cssText = 'background:var(--primary-light);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--primary-dark);font-weight:500';
+      addPanel.insertBefore(hint, addPanel.firstChild);
+    }
+    hint.textContent = '✏️ 正在编辑题目 #' + editingId + '，修改后点击"更新题目"保存';
+  } else {
+    if (hint) hint.remove();
   }
 }
 
@@ -1607,6 +1830,7 @@ async function renderKbList() {
         <div class="kb-item-meta"><span class="kb-tag">${escHtml(item.category)}</span></div>
       </div>
       <div class="kb-item-actions">
+        <button class="btn-icon edit" title="编辑" onclick="editKbItem(${item.id})">✏️</button>
         <button class="btn-icon danger" title="删除" onclick="deleteKbItem(${item.id})">🗑️</button>
       </div>
     </div>
