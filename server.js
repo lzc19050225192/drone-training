@@ -381,11 +381,14 @@ app.listen(PORT, () => {
   console.log('  所有用户共享云端知识库');
   console.log('========================================');
   
-  // 首次启动时尝试从 GitHub 恢复数据
+  // 启动时优先从 GitHub 拉取最新数据
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-  if (GITHUB_TOKEN && !fs.existsSync(DATA_FILE)) {
-    console.log('本地无数据文件，尝试从 GitHub 恢复...');
+  if (GITHUB_TOKEN) {
+    console.log('正在从 GitHub 同步最新题库数据...');
     tryFetchFromGithub(GITHUB_TOKEN);
+  } else {
+    console.log('⚠️ 未设置 GITHUB_TOKEN，题库数据将在重启后丢失');
+    console.log('   请在 Railway 环境变量中设置 GITHUB_TOKEN');
   }
 });
 
