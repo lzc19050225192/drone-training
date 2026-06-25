@@ -710,6 +710,14 @@
   .btn-icon.danger:hover { background: var(--danger-light); color: var(--danger); }
   .btn-icon.edit:hover { background: var(--primary-light); color: var(--primary); }
 
+  .btn-sm { padding: 6px 14px; font-size: 13px; border-radius: 6px; border: none; cursor: pointer; }
+  .btn-sm-primary { background: var(--primary); color: #fff; }
+  .btn-sm-primary:hover { background: var(--primary-dark); }
+  .btn-sm-outline { background: none; border: 1px solid var(--gray-300); color: var(--gray-700); }
+  .btn-sm-outline:hover { background: var(--gray-100); }
+
+  .kb-toolbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+
   .kb-empty {
     text-align: center;
     padding: 40px 20px;
@@ -994,10 +1002,13 @@
 
       <!-- 题库列表 -->
       <div class="kb-panel" id="kb-panel-list">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <div style="font-size:13px;color:var(--gray-500)" id="kb-count-label">共 0 道题</div>
-          <button class="btn-sm btn-outline" onclick="clearAllKb()" style="color:var(--danger);border-color:var(--danger)">🗑️ 清空全部</button>
+        <div class="kb-toolbar">
+          <div style="font-size:13px;color:var(--gray-500);flex:1" id="kb-count-label">共 0 道题</div>
+          <button class="btn-sm btn-sm-outline" onclick="exportKb()">📥 导出备份</button>
+          <button class="btn-sm btn-sm-primary" onclick="importKbFile()">📤 导入备份</button>
+          <button class="btn-sm btn-sm-outline" onclick="clearAllKb()" style="color:var(--danger);border-color:var(--danger)">🗑️ 清空</button>
         </div>
+        <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="handleImportFile(event)">
         <div class="kb-list" id="kb-list-container"></div>
       </div>
 
@@ -1860,6 +1871,59 @@ async function clearAllKb() {
   } catch (e) {
     toast('❌ ' + e.message, 'warn');
   }
+}
+
+// 导出知识库备份到本地文件
+async function exportKb() {
+  if (!adminToken) { toast('⚠️ 请先验证管理员身份', 'warn'); return; }
+  try {
+    // 直接 fetch 获取完整数据
+    const res = await fetch(API_BASE + '/export', {
+      headers: { 'X-Admin-Password': adminToken }
+    });
+    if (!res.ok) throw new Error('导出失败');
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'kb-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('✅ 备份已下载（' + data.length + ' 道题）');
+  } catch (e) {
+    toast('❌ 导出失败: ' + e.message, 'warn');
+  }
+}
+
+// 触发文件选择
+function importKbFile() {
+  if (!adminToken) { toast('⚠️ 请先验证管理员身份', 'warn'); return; }
+  document.getElementById('import-file-input').click();
+}
+
+// 处理导入文件
+async function handleImportFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!Array.isArray(data)) throw new Error('格式错误：需要 JSON 数组');
+    if (data.length === 0) { toast('⚠️ 备份文件为空', 'warn'); return; }
+    if (!data[0].question || !data[0].answer) {
+      throw new Error('格式错误：缺少 question/answer 字段');
+    }
+    if (!confirm(`确认导入 ${data.length} 道题目？\n\n⚠️ 这将替换当前全部题库数据！`)) return;
+
+    await adminApi(API_BASE + '/clear', 'POST');
+    await adminApi(API_BASE + '/batch', 'POST', { items: data });
+    renderKbList();
+    toast('✅ 已从备份恢复 ' + data.length + ' 道题');
+  } catch (e) {
+    toast('❌ 导入失败: ' + e.message, 'warn');
+  }
+  event.target.value = '';
 }
 
 async function batchImport() {
