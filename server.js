@@ -7,6 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3456;
 
 const DATA_FILE = path.join(__dirname, 'kb-data.json');
+const BACKUP_DIR = path.join(__dirname, 'backups');
 const ADMIN_PASSWORD = 'admin888';
 
 const DEFAULT_KB = [
@@ -42,31 +43,191 @@ const DEFAULT_KB = [
   }
 ];
 
-// 读取知识库数据
+// ========== 数据读写（原子写入 + 自动备份） ==========
+
 function readData() {
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      writeData(DEFAULT_KB);
+      writeData(DEFAULT_KB, false);
       return DEFAULT_KB;
     }
     const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-    return JSON.parse(raw);
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) throw new Error('数据格式错误');
+    return data;
   } catch (e) {
     console.error('读取数据失败:', e.message);
+    // 尝试从最新备份恢复
+    const recovered = recoverFromBackup();
+    if (recovered) {
+      writeData(recovered, false);
+      console.log('已从备份恢复数据');
+      return recovered;
+    }
+    writeData(DEFAULT_KB, false);
     return DEFAULT_KB;
   }
 }
 
-// 写入知识库数据
-function writeData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+function writeData(data, doBackup = true) {
+  // 自动备份（仅当数据有意义时）
+  if (doBackup && data.length > 0) {
+    autoBackup(data);
+  }
+  // 原子写入：先写临时文件，再重命名
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
+  fs.renameSync(tmp, DATA_FILE);
+  // 触发 GitHub 同步（防抖）
+  scheduleGithubSync(data);
 }
 
-// 中间件
+// ========== 自动备份 ==========
+
+function ensureBackupDir() {
+  if (!fs.existsSync(BACKUP_DIR)) {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  }
+}
+
+function autoBackup(data) {
+  try {
+    ensureBackupDir();
+    const now = new Date();
+    const ts = now.toISOString().replace(/[:.]/g, '-');
+    const backupFile = path.join(BACKUP_DIR, `kb-data-${ts}.json`);
+    fs.writeFileSync(backupFile, JSON.stringify(data, null, 2), 'utf-8');
+    // 只保留最近 20 个备份
+    cleanOldBackups(20);
+  } catch (e) {
+    console.error('自动备份失败:', e.message);
+  }
+}
+
+function cleanOldBackups(keep) {
+  try {
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('kb-data-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    for (let i = keep; i < files.length; i++) {
+      fs.unlinkSync(path.join(BACKUP_DIR, files[i]));
+    }
+  } catch (e) {}
+}
+
+function recoverFromBackup() {
+  try {
+    ensureBackupDir();
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('kb-data-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(path.join(BACKUP_DIR, file), 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data) && data.length > 0) {
+          console.log(`从备份恢复: ${file}`);
+          return data;
+        }
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return null;
+}
+
+// ========== GitHub 同步（防抖） ==========
+
+let syncTimer = null;
+let lastSyncSha = null;
+
+function syncToGitHub(data) {
+  const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+  if (!GITHUB_TOKEN) {
+    console.log('GitHub 同步跳过: 未设置 GITHUB_TOKEN');
+    return;
+  }
+  
+  const https = require('https');
+  const content = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
+  
+  const options = {
+    hostname: 'api.github.com',
+    path: '/repos/lzc19050225192/drone-training/contents/kb-data.json',
+    method: 'PUT',
+    headers: {
+      'Authorization': `token ${GITHUB_TOKEN}`,
+      'User-Agent': 'drone-training',
+      'Content-Type': 'application/json',
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  };
+
+  // 先获取当前 SHA
+  const getReq = https.request({
+    hostname: 'api.github.com',
+    path: '/repos/lzc19050225192/drone-training/contents/kb-data.json?ref=main',
+    headers: {
+      'Authorization': `token ${GITHUB_TOKEN}`,
+      'User-Agent': 'drone-training',
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  }, (res) => {
+    let body = '';
+    res.on('data', d => body += d);
+    res.on('end', () => {
+      let sha = null;
+      try {
+        const parsed = JSON.parse(body);
+        sha = parsed.sha;
+      } catch (e) {}
+      
+      const payload = JSON.stringify({
+        message: `管理员更新知识库 (${new Date().toISOString().slice(0,19).replace('T',' ')})`,
+        content: content,
+        branch: 'main',
+        ...(sha ? { sha } : {})
+      });
+
+      const putReq = https.request(options, (putRes) => {
+        let putBody = '';
+        putRes.on('data', d => putBody += d);
+        putRes.on('end', () => {
+          if (putRes.statusCode === 200 || putRes.statusCode === 201) {
+            try {
+              lastSyncSha = JSON.parse(putBody).content?.sha;
+            } catch(e) {}
+            console.log('GitHub 同步成功');
+          } else {
+            // SHA 过期，重置缓存
+            lastSyncSha = null;
+            console.error('GitHub 同步失败:', putRes.statusCode, putBody.slice(0, 200));
+          }
+        });
+      });
+      putReq.on('error', (e) => { lastSyncSha = null; console.error('GitHub 同步网络错误:', e.message); });
+      putReq.write(payload);
+      putReq.end();
+    });
+  });
+  getReq.on('error', (e) => { console.error('GitHub GET 错误:', e.message); });
+  getReq.end();
+}
+
+function scheduleGithubSync(data) {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncToGitHub(data);
+    syncTimer = null;
+  }, 3000); // 3 秒防抖
+}
+
+// ========== 中间件 ==========
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// 管理员密码验证中间件
 function requireAdmin(req, res, next) {
   const password = req.headers['x-admin-password'];
   if (password !== ADMIN_PASSWORD) {
@@ -75,12 +236,10 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ---------- API 路由 ----------
+// ========== API 路由 ==========
 
-// 获取所有题目（学员端使用，无需密码）
 app.get('/api/kb', (req, res) => {
   const data = readData();
-  // 返回时不暴露内部细节，只返回必要字段
   const result = data.map(item => ({
     id: item.id,
     category: item.category,
@@ -91,7 +250,6 @@ app.get('/api/kb', (req, res) => {
   res.json(result);
 });
 
-// 验证管理员密码
 app.post('/api/admin/verify', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
@@ -101,13 +259,6 @@ app.post('/api/admin/verify', (req, res) => {
   }
 });
 
-// 修改管理员密码
-app.post('/api/admin/change-password', requireAdmin, (req, res) => {
-  // 示例：修改密码接口（当前版本不持久化，重启后恢复默认）
-  res.json({ success: true, message: '密码修改功能暂未开放，请联系管理员修改代码中的 ADMIN_PASSWORD' });
-});
-
-// 添加题目（需要管理员权限）
 app.post('/api/kb', requireAdmin, (req, res) => {
   const { category, question, answer, keypoints } = req.body;
   if (!question || !answer) {
@@ -127,7 +278,6 @@ app.post('/api/kb', requireAdmin, (req, res) => {
   res.json({ success: true, item: newItem });
 });
 
-// 删除题目（需要管理员权限）
 app.delete('/api/kb/:id', requireAdmin, (req, res) => {
   const id = parseInt(req.params.id);
   let data = readData();
@@ -140,13 +290,11 @@ app.delete('/api/kb/:id', requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-// 清空知识库（需要管理员权限）
 app.post('/api/kb/clear', requireAdmin, (req, res) => {
   writeData([]);
   res.json({ success: true });
 });
 
-// 批量导入（需要管理员权限）
 app.post('/api/kb/batch', requireAdmin, (req, res) => {
   const { items } = req.body;
   if (!items || !Array.isArray(items) || !items.length) {
@@ -172,7 +320,6 @@ app.post('/api/kb/batch', requireAdmin, (req, res) => {
   res.json({ success: true, imported: count, total: data.length });
 });
 
-// 更新题目（需要管理员权限）
 app.put('/api/kb/:id', requireAdmin, (req, res) => {
   const id = parseInt(req.params.id);
   const { category, question, answer, keypoints } = req.body;
@@ -189,10 +336,30 @@ app.put('/api/kb/:id', requireAdmin, (req, res) => {
   res.json({ success: true, item: data[idx] });
 });
 
-// 静态文件服务（放在路由后面，API 优先生效）
+// 导出备份
+app.get('/api/kb/export', requireAdmin, (req, res) => {
+  const data = readData();
+  res.setHeader('Content-Disposition', `attachment; filename="kb-backup-${new Date().toISOString().slice(0,10)}.json"`);
+  res.json(data);
+});
+
+// 查看备份列表
+app.get('/api/kb/backups', requireAdmin, (req, res) => {
+  try {
+    ensureBackupDir();
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('kb-data-'))
+      .sort()
+      .reverse();
+    res.json({ backups: files });
+  } catch (e) {
+    res.json({ backups: [] });
+  }
+});
+
+// 静态文件
 app.use(express.static(__dirname));
 
-// SPA fallback: 所有非 API 请求返回 index.html
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: '接口不存在' });
@@ -200,16 +367,54 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// 优雅退出时保存数据
 process.on('SIGTERM', () => {
-  console.log('服务关闭，数据已保存');
+  console.log('服务关闭');
   process.exit(0);
 });
 
 app.listen(PORT, () => {
-  console.log(`🚁 无人机销售培训助手已启动`);
-  console.log(`   地址: http://localhost:${PORT}`);
-  console.log(`   管理员密码: ${ADMIN_PASSWORD}`);
-  console.log(`   数据文件: ${DATA_FILE}`);
-  console.log(`   所有用户共享云端知识库 ✅`);
+  console.log('========================================');
+  console.log('  无人机销售培训助手');
+  console.log('  http://localhost:' + PORT);
+  console.log('  数据文件: ' + DATA_FILE);
+  console.log('  备份目录: ' + BACKUP_DIR);
+  console.log('  所有用户共享云端知识库');
+  console.log('========================================');
+  
+  // 首次启动时尝试从 GitHub 恢复数据
+  const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+  if (GITHUB_TOKEN && !fs.existsSync(DATA_FILE)) {
+    console.log('本地无数据文件，尝试从 GitHub 恢复...');
+    tryFetchFromGithub(GITHUB_TOKEN);
+  }
 });
+
+function tryFetchFromGithub(token) {
+  const https = require('https');
+  https.get({
+    hostname: 'api.github.com',
+    path: '/repos/lzc19050225192/drone-training/contents/kb-data.json?ref=main',
+    headers: {
+      'Authorization': `token ${token}`,
+      'User-Agent': 'drone-training',
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  }, (res) => {
+    let body = '';
+    res.on('data', d => body += d);
+    res.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        if (data.content) {
+          const content = Buffer.from(data.content, 'base64').toString('utf-8');
+          fs.writeFileSync(DATA_FILE, content, 'utf-8');
+          console.log('已从 GitHub 恢复数据');
+        }
+      } catch (e) {
+        console.log('从 GitHub 恢复数据失败:', e.message);
+      }
+    });
+  }).on('error', (e) => {
+    console.log('GitHub 连接失败:', e.message);
+  });
+}
